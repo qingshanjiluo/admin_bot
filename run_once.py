@@ -26,7 +26,7 @@ def main():
         "post_interval_minutes": 1,
         "content_snippet_length": 200,
         "exempt_thread_ids": [15669, 28348, 27305, 27115, 11411, 3448],
-        "login_retries": 50,
+        "login_retries": 3,
     }
     bot = AdminBot(bot_config, api_key)
     bot.run(continuous=False)   # 单次运行
