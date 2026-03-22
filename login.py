@@ -144,19 +144,19 @@ class BBSTurkeyBotLogin:
                 time.sleep(2)
                 continue
             captcha_text = self.recognize_captcha_with_retry(svg_data)
-如果captcha_text为空：
-                打印("[错误] 验证码识别失败，继续重试...")
-时间。休眠(2)
+            if not captcha_text:
+                print("[错误] 验证码识别失败，继续重试...")
+                time.sleep(2)
                 continue
-成功，结果，错误信息 = 自我。login_with_captcha(captcha_id, captcha_text)
-如果成功：
-                打印(f"[成功] 登录成功！总共尝试 {login_attempts} 次")
-                返回 True, result, self.session
-如果  ("验证码"在error_msg 或 “captcha” 在 error_msg.lower()):
+            success, result, error_msg = self.login_with_captcha(captcha_id, captcha_text)
+            if success:
+                print(f"[成功] 登录成功！总共尝试 {login_attempts} 次")
+                return True, result, self.session
+            if error_msg and ("验证码" in error_msg or "captcha" in error_msg.lower()):
                 print("[重试] 验证码错误，立即重试...")
                 continue
             else:
                 print("[等待] 其他错误，等待 2 秒后重试...")
                 time.sleep(2)
         print(f"[失败] 登录失败！已达到最大重试次数 {self.max_login_attempts}")
-返回 False, 无, 无
+        return False, None, None
