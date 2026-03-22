@@ -13,7 +13,7 @@ class BBSPoster:
         self.create_post_url = f"{self.api_base}/posts/create"
 
     def create_thread(self, token, category_id, title, content):
-尝试:
+        try:
             headers = {'Authorization': token, 'Content-Type': 'application/json'}
             thread_data = {
                 "category_id": category_id,
@@ -22,9 +22,9 @@ class BBSPoster:
             }
             print(f"[发帖] 创建帖子: {title}")
             response = self.session.post(self.create_thread_url, json=thread_data, headers=headers, timeout=15)
-如果 response.status_code == 200:
+            if response.status_code == 200:
                 result = response.json()
-如果 result.get('success') 为 True:
+                if result.get('success') is True:
                     thread_data = result.get('data', {})
                     if 'id' in thread_data:
                         print(f"[成功] 发帖成功！帖子ID: {thread_data.get('id')}")
@@ -39,7 +39,7 @@ class BBSPoster:
             return False, None
 
     def get_threads(self, token, category_id=None, page_limit=20, page_offset=0, user_id=None):
-尝试:
+        try:
             headers = {'Authorization': token}
             params = {
                 "page_limit": page_limit,
@@ -51,9 +51,9 @@ class BBSPoster:
             if user_id:
                 params["user_id"] = user_id
             response = self.session.get(self.list_threads_url, headers=headers, params=params, timeout=15)
-如果 response.status_code == 200:
+            if response.status_code == 200:
                 result = response.json()
-如果 result.get('success') 为 True:
+                if result.get('success') is True:
                     threads = result.get('data', [])
                     print(f"[信息] 获取到 {len(threads)} 个帖子 (页偏移 {page_offset})")
                     return threads
@@ -68,13 +68,13 @@ class BBSPoster:
             return []
 
     def get_post_comments(self, token, thread_id):
-尝试:
+        try:
             headers = {'Authorization': token}
             params = {"thread_id": thread_id, "page_limit": 200, "page_offset": 0}
             response = self.session.get(self.list_posts_url, headers=headers, params=params, timeout=15)
-如果 response.status_code == 200:
+            if response.status_code == 200:
                 result = response.json()
-如果 result.get('success') 为 True:
+                if result.get('success') is True:
                     posts = result.get('data', [])
                     comments = [post for post in posts if not post.get('is_first', True)]
                     return comments
@@ -89,15 +89,15 @@ class BBSPoster:
             return []
 
     def create_comment(self, token, thread_id, content):
-尝试:
+        try:
             headers = {'Authorization': token, 'Content-Type': 'application/json'}
             post_data = {"thread_id": thread_id, "content": content}
             response = self.session.post(self.create_post_url, json=post_data, headers=headers, timeout=15)
-如果 response.status_code == 200:
+            if response.status_code == 200:
                 result = response.json()
-如果 result.get('success') 为 True:
+                if result.get('success') is True:
                     print(f"[成功] 评论发布成功！帖子ID: {thread_id}")
-返回 True
+                    return True
                 else:
                     print(f"[失败] 评论发布失败: {result.get('message')}")
                     return False
