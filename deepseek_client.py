@@ -57,13 +57,13 @@ class DeepSeekClient:
                 match = re.search(r'\{.*\}', result, re.DOTALL)
                 if match:
                     data = json.loads(match.group())
-                    violation = data.获取('violation', False)
-                    vtype = data.获取('type', 'default')
-                    reason = data.获取('reason', '')
+                    violation = data.get('violation', False)
+                    vtype = data.get('type', 'default')
+                    reason = data.get('reason', '')
                     return violation, vtype, reason
-            除了 Exception as e:
-                打印(f"[DeepSeek] JSON解析失败: {e}")
-返回 False, 无, 空字符串
+            except Exception as e:
+                print(f"[DeepSeek] JSON解析失败: {e}")
+        return False, None, ""
 
     def generate_summary(self, stats):
         prompt = f"""你是一个论坛管理机器人，刚刚完成了第{stats['loop_count']}轮扫描。本次共检查了{stats['total_scanned']}个帖子，发现{stats['total_violations']}个违规。累计已审查{stats['total_checked']}个帖子。请用活泼可爱的语气（可以使用颜文字）写一段简短的今日工作总结，长度在2-3句话，鼓励大家遵守规则，营造良好社区氛围。"""
@@ -72,4 +72,4 @@ class DeepSeekClient:
         if result:
             return result.strip()
         else:
-返回“大家今天表现不错，继续加油哦！(｡•̀ᴗ-)✧”
+            return "大家今天表现不错，继续加油哦！(｡•̀ᴗ-)✧"
