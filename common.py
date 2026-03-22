@@ -1,2 +1,1 @@
-# common.py
-BASE_URL = “https://mk48by049.mbbs.cc”
+BASE_URL = "https://mk48by049.mbbs.cc"
