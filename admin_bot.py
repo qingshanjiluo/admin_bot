@@ -308,16 +308,16 @@ class AdminBot:
             while self.running:
                 self.loop_count += 1
                 print(f"\n[循环] 第 {self.loop_count} 次扫描 - {datetime.now()}")
-                scanned, violations = self.扫描线程(poster)
+                scanned, violations = self.scan_threads(poster)
                 print(f"[统计] 本轮扫描: 新增记录 {scanned} 个帖子，发现违规 {violations} 个")
                 self.post_daily_report(poster)
                 self._save_state()
                 if not continuous or not self.running:
-                     break
+                    break
                 # 连续模式下等待间隔（单次模式不等待）
-                for _ 在 range(self.config.get("scan_interval", 7200)):
+                for _ in range(self.config.get("scan_interval", 7200)):
                     if not self.running:
-                         break
+                        break
                     time.sleep(1)
         except KeyboardInterrupt:
             print("\n[中断] 用户中断")
