@@ -133,9 +133,10 @@ class AdminBot:
             return False, None, "AI调用失败"
         return violation, vtype, reason
 
-    # ---------- 发送警告 ----------
+    # ---------- 发送警告（有温度版）----------
     def send_warning_to_thread(self, thread_id, violation_type, reason):
-        warn_msg = f"【管理员警告】您的帖子涉嫌违规（类型：{violation_type}）。请遵守论坛规则。理由：{reason[:200]}。如有疑问，请联系管理员。"
+        short_reason = reason[:80] + ("..." if len(reason) > 80 else "")
+        warn_msg = f"您好，您的帖子可能违反了论坛规则（{violation_type}）。{short_reason} 请遵守版规，感谢理解与支持。如有疑问可联系管理员。"
         success = self.poster.create_comment(self.token, thread_id, warn_msg)
         if success:
             print(f"✅ 已对帖子 {thread_id} 发出警告")
@@ -144,7 +145,8 @@ class AdminBot:
         return success
 
     def send_warning_to_comment(self, post_id, violation_type, reason):
-        warn_msg = f"【管理员警告】您的评论涉嫌违规（类型：{violation_type}）。请遵守论坛规则。理由：{reason[:200]}。如有疑问，请联系管理员。"
+        short_reason = reason[:80] + ("..." if len(reason) > 80 else "")
+        warn_msg = f"您好，您的评论可能违反了论坛规则（{violation_type}）。{short_reason} 请遵守版规，感谢理解与支持。如有疑问可联系管理员。"
         success = self.poster.reply_to_comment(self.token, post_id, warn_msg)
         if success:
             print(f"✅ 已对评论 {post_id} 发出警告")
@@ -178,15 +180,12 @@ class AdminBot:
         content = thread.get('content', '')
         full = f"{title}\n{content}"
         
-        # 获取所有评论
         comments = self._get_all_comments(tid)
-        # 构建评论上下文（前20条，每条最多150字）
         comments_text = ""
         for idx, c in enumerate(comments[:20]):
             c_content = c.get('content', '')[:150]
             comments_text += f"评论{idx+1}: {c_content}\n"
         
-        # 1. 检测帖子本身（结合评论）
         is_violation, vtype, reason = self.check_violation_with_context(full, comments_text)
         snippet = full[:self.content_snippet_length] + ("..." if len(full) > self.content_snippet_length else "")
         
@@ -218,7 +217,6 @@ class AdminBot:
         
         self.warned_ids.add(tid)
         
-        # 2. 对每条评论单独检测
         for comment in comments:
             cid = comment['id']
             if cid in self.warned_comment_ids:
