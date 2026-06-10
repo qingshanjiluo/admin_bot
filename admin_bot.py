@@ -46,8 +46,10 @@ class AdminBot:
         self.session = None
         self.token = None
         self.user_id = None
-        self.warned_ids = set()
-        self.warned_comment_ids = set()
+        self.warned_ids = set()               # 已警告的帖子ID（用于日报标记）
+        self.warned_comment_ids = set()       # 已警告的评论ID
+        self.processed_ids = set()            # 所有已处理的帖子ID（包括合规）
+        self.processed_comment_ids = set()    # 所有已处理的评论ID（包括合规）
         self.daily_log = []
         self.daily_violations = []
         self.loop_count = 0
@@ -55,7 +57,7 @@ class AdminBot:
         self.pinned_skipped = set()
         self.running = True
         
-        # OCR 初始化（如果可用）
+        # OCR 初始化
         self.ocr = None
         if OCR_AVAILABLE:
             try:
@@ -66,6 +68,7 @@ class AdminBot:
         
         self._load_state()
         self.warned_ids.update(self.exempt_ids)
+        self.processed_ids.update(self.exempt_ids)   # 豁免帖子也标记为已处理
         signal.signal(signal.SIGINT, self._signal_handler)
 
     # ---------- 辅助函数 ----------
@@ -95,31 +98,20 @@ class AdminBot:
         return False
 
     def _extract_image_urls(self, html_content):
-        """从帖子内容 HTML 中提取图片 URL"""
         if not html_content:
             return []
-        # 匹配 img 标签的 src 属性
         pattern = r'<img[^>]+src=["\'](.*?)["\']'
         urls = re.findall(pattern, html_content)
-        # 过滤 data:image 等 base64 图片（可选处理）
-        valid_urls = []
-        for url in urls:
-            if url.startswith('http://') or url.startswith('https://'):
-                valid_urls.append(url)
-        return valid_urls
+        valid = [url for url in urls if url.startswith(('http://', 'https://'))]
+        return valid
 
     def _ocr_image(self, image_url):
-        """下载图片并识别文字，返回识别出的文本"""
         if not self.ocr:
             return ""
         try:
-            # 下载图片（超时 10 秒）
-            resp = requests.get(image_url, timeout=10, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
+            resp = requests.get(image_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
             if resp.status_code != 200:
                 return ""
-            # 识别图片中的文字
             result = self.ocr.classification(resp.content)
             return result.strip() if result else ""
         except Exception as e:
@@ -127,11 +119,9 @@ class AdminBot:
             return ""
 
     def _get_post_text_with_images(self, thread_detail):
-        """获取帖子的完整文本（内容 + 图片 OCR 文字）"""
         content = thread_detail.get('content', '')
         ocr_texts = []
         image_urls = self._extract_image_urls(content)
-        # 最多识别前 3 张图片，避免耗时过长
         for img_url in image_urls[:3]:
             text = self._ocr_image(img_url)
             if text:
@@ -147,6 +137,8 @@ class AdminBot:
                 data = json.load(f)
                 self.warned_ids = set(data.get("warned_ids", []))
                 self.warned_comment_ids = set(data.get("warned_comment_ids", []))
+                self.processed_ids = set(data.get("processed_ids", []))
+                self.processed_comment_ids = set(data.get("processed_comment_ids", []))
                 self.daily_log = data.get("daily_log", [])
                 self.daily_violations = data.get("daily_violations", [])
 
@@ -154,6 +146,8 @@ class AdminBot:
         data = {
             "warned_ids": list(self.warned_ids),
             "warned_comment_ids": list(self.warned_comment_ids),
+            "processed_ids": list(self.processed_ids),
+            "processed_comment_ids": list(self.processed_comment_ids),
             "daily_log": self.daily_log[-1000:],
             "daily_violations": self.daily_violations[-500:]
         }
@@ -190,7 +184,6 @@ class AdminBot:
         return violation, vtype, reason
 
     def check_violation_with_context(self, thread_text, comments_text):
-        """综合帖子内容和评论判断帖子是否违规"""
         hit = self._contains_sensitive(thread_text)
         if hit:
             return True, "political", f"命中敏感词: {hit}"
@@ -200,7 +193,7 @@ class AdminBot:
             return False, None, "AI调用失败"
         return violation, vtype, reason
 
-    # ---------- 发送警告（有温度版）----------
+    # ---------- 发送警告 ----------
     def send_warning_to_thread(self, thread_id, violation_type, reason):
         short_reason = reason[:80] + ("..." if len(reason) > 80 else "")
         warn_msg = f"您好，您的帖子可能违反了论坛规则（{violation_type}）。{short_reason} 请遵守版规，感谢理解与支持。如有疑问可联系管理员。"
@@ -244,11 +237,9 @@ class AdminBot:
     def scan_thread_and_comments(self, thread):
         tid = thread['id']
         title = thread['title']
-        # 获取完整帖子详情（含 HTML 内容）
         detail = self.poster.get_thread_detail(self.token, tid)
         if not detail:
             detail = thread
-        # 获取带图片 OCR 文字的完整帖子文本
         full_content = self._get_post_text_with_images(detail)
         full = f"{title}\n{full_content}"
         
@@ -284,14 +275,16 @@ class AdminBot:
             })
             print(f"      ⚠️ 帖子违规！类型: {vtype}, 原因: {reason[:100]}...")
             self.send_warning_to_thread(tid, vtype, reason)
+            self.warned_ids.add(tid)
         else:
             print(f"      ✅ 帖子合规")
         
-        self.warned_ids.add(tid)
+        # 标记帖子为已处理（无论是否违规）
+        self.processed_ids.add(tid)
         
         for comment in comments:
             cid = comment['id']
-            if cid in self.warned_comment_ids:
+            if cid in self.processed_comment_ids:
                 continue
             c_content = comment.get('content', '')
             c_author = comment.get('user', {}).get('nickname', '未知')
@@ -321,9 +314,10 @@ class AdminBot:
                 })
                 print(f"      ⚠️ 评论违规！类型: {vtype_c}, 原因: {reason_c[:100]}...")
                 self.send_warning_to_comment(cid, vtype_c, reason_c)
+                self.warned_comment_ids.add(cid)
             else:
                 print(f"      ✅ 评论合规")
-            self.warned_comment_ids.add(cid)
+            self.processed_comment_ids.add(cid)
             time.sleep(0.3)
         
         return 1
@@ -351,7 +345,8 @@ class AdminBot:
                     process = []
                 for t in process:
                     tid = t['id']
-                    if tid in self.warned_ids:
+                    # 跳过已处理的帖子（包括合规和违规）
+                    if tid in self.processed_ids:
                         continue
                     if t.get('is_pinned', False):
                         if tid not in self.pinned_skipped:
@@ -359,11 +354,10 @@ class AdminBot:
                             self.pinned_skipped.add(tid)
                         continue
                     if t.get('user_id') == self.user_id:
-                        self.warned_ids.add(tid)
+                        self.processed_ids.add(tid)
                         scanned += 1
                         continue
                     print(f"   处理: {t['title'][:30]} (ID: {tid})")
-                    # 确保有内容（后续 scan_thread_and_comments 会获取详情）
                     self.scan_thread_and_comments(t)
                     scanned += 1
                 total += len(threads)
@@ -415,7 +409,7 @@ class AdminBot:
         today = date.today().isoformat()
         today_violations = [v for v in self.daily_violations if v['time'].startswith(today)]
         total_violations = len(today_violations)
-        total_checked = len(self.warned_ids) + len(self.warned_comment_ids)
+        total_checked = len(self.processed_ids) + len(self.processed_comment_ids)
 
         type_dist = {}
         for v in today_violations:
