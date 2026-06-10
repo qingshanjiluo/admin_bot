@@ -27,7 +27,7 @@ class DeepSeekClient:
 
         # 读取模型名称（优先级：环境变量 OPENAI_MODEL > DEEPSEEK_MODEL > 默认）
         self.model = os.getenv("OPENAI_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek-chat"
-        # 注意：如果模型名称必须是 deepseek-v4-pro 或 deepseek-v4-flash，请修改默认值或设置环境变量
+        # 注意：如果您的 DeepSeek 账号需要特定模型（如 deepseek-v4-pro），请设置环境变量 DEEPSEEK_MODEL
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -88,6 +88,10 @@ class DeepSeekClient:
 - ad: 商业广告（正常游戏交流、教程不视为违规）
 - default: 其他（正常内容）
 
+**重要说明**：
+- 纯表情、无意义水帖（如“顶”、“沙发”、“🥹”、重复字符等）**不属于违规**，请返回 violation=false, type=default。
+- 正常的游戏战斗、舰队管理、教程分享、闲聊都不违规。
+
 背景知识：{background}
 规则：{rules}
 
@@ -101,9 +105,14 @@ class DeepSeekClient:
             violation = result.get("violation", False)
             vtype = result.get("type", "default")
             reason = result.get("reason", "")
-            allowed_types = {'political','porn','violence','discrimination','privacy','ad','default'}
+            # 修正：如果类型是 default，则违规标志必须为 False
+            if vtype == "default":
+                violation = False
+            # 确保类型在允许范围内
+            allowed_types = {'political', 'porn', 'violence', 'discrimination', 'privacy', 'ad', 'default'}
             if vtype not in allowed_types:
                 vtype = 'default'
+                violation = False
             return violation, vtype, reason
         except Exception as e:
             print(f"违规判断 JSON 解析失败: {e}")
