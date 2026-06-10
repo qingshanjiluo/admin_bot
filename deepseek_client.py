@@ -5,7 +5,7 @@ import os
 
 class DeepSeekClient:
     """
-    OpenAI 兼容 API 客户端（支持 DeepSeek、OpenAI、本地 Ollama 等）
+    OpenAI 兼容 API 客户端（支持 DeepSeek、OpenAI 等）
     """
 
     def __init__(self, api_key=None, base_url=None):
@@ -25,12 +25,16 @@ class DeepSeekClient:
             self.base_url = "https://api.deepseek.com/v1"
         self.base_url = self.base_url.rstrip('/')
 
+        # 读取模型名称（优先级：环境变量 OPENAI_MODEL > DEEPSEEK_MODEL > 默认）
+        self.model = os.getenv("OPENAI_MODEL") or os.getenv("DEEPSEEK_MODEL") or "deepseek-chat"
+        # 注意：如果模型名称必须是 deepseek-v4-pro 或 deepseek-v4-flash，请修改默认值或设置环境变量
+
         self.session = requests.Session()
         self.session.headers.update({
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json',
         })
-        print(f"✅ API 客户端初始化成功，Base URL: {self.base_url}")
+        print(f"✅ API 客户端初始化成功，Base URL: {self.base_url}, Model: {self.model}")
 
     def generate(self, prompt, max_tokens=200, temperature=0.8, model=None):
         """
@@ -38,10 +42,10 @@ class DeepSeekClient:
         :param prompt: 用户提示词
         :param max_tokens: 最大生成 token 数
         :param temperature: 随机性 (0-1)
-        :param model: 模型名称，默认从环境变量 OPENAI_MODEL 或 DEEPSEEK_MODEL 读取，若未设置则使用 'gpt-3.5-turbo'
+        :param model: 模型名称，若不传则使用 self.model
         :return: 生成的文本字符串
         """
-        model = model or os.getenv("OPENAI_MODEL") or os.getenv("DEEPSEEK_MODEL") or "gpt-3.5-turbo"
+        model = model or self.model
         try:
             payload = {
                 "model": model,
@@ -62,11 +66,7 @@ class DeepSeekClient:
             return ""
 
     def generate_summary(self, data):
-        """
-        生成日报摘要（用于管理员机器人）
-        :param data: 统计数据字典
-        :return: 摘要文本
-        """
+        """生成日报摘要（用于管理员机器人）"""
         prompt = f"请根据以下统计数据生成一段简洁的日报小结（不超过100字）：{json.dumps(data, ensure_ascii=False)}"
         return self.generate(prompt, max_tokens=100, temperature=0.7)
 
@@ -85,7 +85,7 @@ class DeepSeekClient:
 - violence: 暴力血腥、恐怖主义
 - discrimination: 种族/性别/宗教歧视
 - privacy: 泄露他人隐私（开盒）
-- ad: 商业广告（正常游戏交流、教程不视为广告）
+- ad: 商业广告（正常游戏交流、教程不视为违规）
 - default: 其他（正常内容）
 
 背景知识：{background}
@@ -101,7 +101,6 @@ class DeepSeekClient:
             violation = result.get("violation", False)
             vtype = result.get("type", "default")
             reason = result.get("reason", "")
-            # 确保类型在允许范围内
             allowed_types = {'political','porn','violence','discrimination','privacy','ad','default'}
             if vtype not in allowed_types:
                 vtype = 'default'
