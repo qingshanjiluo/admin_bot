@@ -4,11 +4,12 @@ import os
 import json
 import signal
 import sys
-from datetime import datetime
+import re
+from datetime import datetime, date
 from login import BBSTurkeyBotLogin
 from post import BBSPoster
 from common import BASE_URL
-from deepseek_client import DeepSeekClient
+from deepseek_client import DeepSeekClient   # 可选，使用 DeepSeek API；若用 Ollama 可替换
 
 class AdminBot:
     def __init__(self, config, api_key):
@@ -16,26 +17,34 @@ class AdminBot:
         self.username = config.get("username")
         self.password = config.get("password")
         self.login_retries = config.get("login_retries", 50)
+        self.scan_interval = config.get("scan_interval", 7200)
         self.target_categories = config.get("target_categories", [2, 5])
         self.admin_category = 15
         self.skip_latest = config.get("skip_latest", 5)
         self.max_threads = config.get("max_threads", 30)
+        self.daily_report_interval = config.get("daily_report_interval", 86400)
         self.post_interval_minutes = config.get("post_interval_minutes", 1)
         self.content_snippet_length = config.get("content_snippet_length", 200)
         self.exempt_ids = set(config.get("exempt_thread_ids", [15669, 28348, 27305, 27115, 11411, 3448]))
-        self.ai = DeepSeekClient(api_key=api_key)
+        
+        # 使用 DeepSeek API 或 Ollama（二选一）
+        self.ai = DeepSeekClient(api_key=api_key)   # 替换为 Ollama 客户端亦可
+        
         self.background = self._load_file("mk48.txt")
         self.rules = self._load_file("rules.txt")
         self.sensitive_words = self._load_sensitive_words()
+        
         self.session = None
         self.token = None
         self.user_id = None
         self.warned_ids = set()
-        self.daily_log = []          # 本轮扫描日志
-        self.daily_violations = []   # 本轮发现的违规帖子详情
+        self.daily_log = []
+        self.daily_violations = []
         self.loop_count = 0
+        self.last_report_time = None
         self.pinned_skipped = set()
         self.running = True
+        
         self._load_state()
         self.warned_ids.update(self.exempt_ids)
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -70,9 +79,15 @@ class AdminBot:
             with open("processed_admin.json", 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 self.warned_ids = set(data.get("warned_ids", []))
+                self.daily_log = data.get("daily_log", [])
+                self.daily_violations = data.get("daily_violations", [])
 
     def _save_state(self):
-        data = {"warned_ids": list(self.warned_ids)}
+        data = {
+            "warned_ids": list(self.warned_ids),
+            "daily_log": self.daily_log[-1000:],
+            "daily_violations": self.daily_violations[-500:]
+        }
         with open("processed_admin.json", "w", encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -102,11 +117,19 @@ class AdminBot:
             return False, None, "AI调用失败"
         return violation, vtype, reason
 
+    def send_warning(self, poster, thread_id, violation_type, reason):
+        """在违规帖子下发布警告评论"""
+        warn_msg = f"【管理员警告】您的帖子涉嫌违规（类型：{violation_type}）。请遵守论坛规则。理由：{reason[:200]}。如有疑问，请联系管理员。"
+        success = poster.create_comment(self.token, thread_id, warn_msg)
+        if success:
+            print(f"✅ 已对帖子 {thread_id} 发出警告")
+        else:
+            print(f"❌ 警告发布失败，帖子 {thread_id}")
+        return success
+
     def scan_threads(self, poster):
         scanned = 0
         violations = 0
-        self.daily_log = []
-        self.daily_violations = []
         for cat_id in self.target_categories:
             if not self.running:
                 break
@@ -119,6 +142,7 @@ class AdminBot:
                 threads = poster.get_threads(self.token, cat_id, page_limit=self.max_threads, page_offset=offset)
                 if not threads:
                     break
+                # 跳过最新的若干条
                 if len(threads) > self.skip_latest:
                     process = threads[self.skip_latest:]
                     print(f"   跳过本页最新 {self.skip_latest} 个帖子")
@@ -160,11 +184,13 @@ class AdminBot:
                             "title": t['title'],
                             "snippet": snippet,
                             "type": vtype,
-                            "reason": reason,        # 完整的AI判定语句
+                            "reason": reason,
                             "link": f"https://mk48by049.mbbs.cc/#/thread/detail/{tid}"
                         })
                         violations += 1
                         print(f"      ⚠️ 违规！类型: {vtype}, 原因: {reason[:100]}...")
+                        # 发送警告评论
+                        self.send_warning(poster, tid, vtype, reason)
                     elif violation and vtype == 'ad':
                         print(f"      [广告忽略]")
                     else:
@@ -179,104 +205,88 @@ class AdminBot:
         return scanned, violations
 
     def _build_report_section(self, violations_sublist, start_idx, total_parts, overall):
-        content = f"## 📊 {overall['date']} 本轮违规统计 (第{start_idx}部分/共{total_parts}部分)\n\n"
-        content += f"- 检查帖子总数：{overall['total_scanned']}\n"
-        content += f"- 发现违规帖子：{overall['total_violations']}\n"
+        content = f"## 📊 {overall['today']} 违规统计 (第{start_idx}部分/共{total_parts}部分)\n\n"
+        content += f"- 今日发现违规帖子：{overall['total_violations']}\n"
         content += f"- 累计审查帖子总数：{overall['total_checked']}\n"
-        content += f"- 本轮序号：{overall['loop_count']}\n\n"
+        content += f"- 当前循环次数：{overall['loop_count']}\n\n"
         content += f"### ⚠️ 本部分违规帖子（{len(violations_sublist)}个）\n"
         for idx, v in enumerate(violations_sublist, 1):
             content += f"{idx}. [{v['title']}]({v['link']})\n"
             content += f"   - **类型**：{v['type']}\n"
-            content += f"   - **判定**：{v['reason']}\n"          # 完整AI判定语句
+            content += f"   - **原因**：{v['reason']}\n"
             content += f"   - **原文摘要**：{v.get('snippet', '无')}\n\n"
         content += f"\n---\n*报告由最中幻想天眼管理机器人自动生成*"
         return content
 
-    def _post_with_retry(self, poster, title, content, retry_login=True):
+    def _post_with_retry(self, poster, title, content):
+        """发布帖子，失败时重试一次并保存本地备份"""
         success, _ = poster.create_thread(self.token, self.admin_category, title, content)
         if success:
             print(f"[日报] 成功发布")
             return True
-
-        print("[日报] 发布失败，将在30秒后重试...")
-        filename = f"failed_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(f"标题：{title}\n\n")
-                f.write(content)
-            print(f"[日报] 内容已保存至本地文件：{os.path.abspath(filename)}")
-        except Exception as e:
-            print(f"[日报] 保存本地文件失败：{e}")
-
+        print("[日报] 发布失败，30秒后重试...")
         time.sleep(30)
-        if retry_login:
-            print("[日报] 尝试重新登录...")
-            if self.login():
-                print("[日报] 重新登录成功，使用新 token 重试发布")
-                poster = BBSPoster(self.session, BASE_URL)
-            else:
-                print("[日报] 重新登录失败，仍使用原 token 重试")
-
-        success2, _ = poster.create_thread(self.token, self.admin_category, title, content)
-        if success2:
-            print(f"[日报] 重试成功，已发布")
-            return True
-        else:
-            print(f"[日报] 重试仍失败")
-            return False
+        # 重新登录
+        if self.login():
+            poster = BBSPoster(self.session, BASE_URL)
+            success2, _ = poster.create_thread(self.token, self.admin_category, title, content)
+            if success2:
+                print("[日报] 重试成功")
+                return True
+        # 保存本地备份
+        filename = f"failed_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(f"标题：{title}\n\n{content}")
+        print(f"[日报] 已保存至 {filename}")
+        return False
 
     def post_daily_report(self, poster):
-        today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        total_scanned = len(self.daily_log)
-        total_violations = len(self.daily_violations)
+        today = date.today().isoformat()
+        today_violations = [v for v in self.daily_violations if v['time'].startswith(today)]
+        total_violations = len(today_violations)
         total_checked = len(self.warned_ids)
 
-        # 生成可爱总结
-        summary = self.ai.generate_summary({
-            'total_scanned': total_scanned,
-            'total_violations': total_violations,
-            'total_checked': total_checked,
-            'loop_count': self.loop_count
-        })
+        # 类型分布
+        type_dist = {}
+        for v in today_violations:
+            t = v['type']
+            type_dist[t] = type_dist.get(t, 0) + 1
 
-        if not self.daily_violations:
-            title = f"【管理日报】{today} 第{self.loop_count}次扫描 - 违规 0 个"
-            content = f"## 📊 {today} 本轮扫描统计\n\n"
-            content += f"- 检查帖子总数：{total_scanned}\n"
-            content += f"- 发现违规帖子：0\n"
-            content += f"- 累计审查帖子总数：{total_checked}\n"
-            content += f"- 本轮序号：{self.loop_count}\n\n"
-            content += "本轮无违规帖子。\n"
-            content += f"\n---\n**今日小结**：{summary}\n"
-            content += f"\n*报告由最中幻想天眼管理机器人自动生成*"
-            self._post_with_retry(poster, title, content, retry_login=True)
-            return
+        # 生成总结（AI）
+        if total_violations > 0:
+            summary = self.ai.generate_summary({
+                'total_checked': total_checked,
+                'total_violations': total_violations,
+                'type_distribution': type_dist,
+                'loop_count': self.loop_count
+            })
+        else:
+            summary = "今日无违规帖子，大家表现不错！继续加油~ ✨"
 
-        overall = {
-            'date': today,
-            'total_scanned': total_scanned,
+        overall_stats = {
+            'today': today,
             'total_violations': total_violations,
             'total_checked': total_checked,
             'loop_count': self.loop_count
         }
 
-        full_content = self._build_report_section(self.daily_violations, 1, 1, overall)
+        full_content = self._build_report_section(today_violations, 1, 1, overall_stats)
         if len(full_content) <= 4000:
             full_content += f"\n\n---\n**今日小结**：{summary}\n"
-            title = f"【管理日报】{today} 第{self.loop_count}次扫描 - 违规 {total_violations} 个"
-            self._post_with_retry(poster, title, full_content, retry_login=True)
+            title = f"【管理日报】{today} 第{self.loop_count}次循环 - 违规 {total_violations} 个"
+            self._post_with_retry(poster, title, full_content)
+            self.last_report_time = time.time()
             return
 
-        # 分片
+        # 分片发布
         print(f"[日报] 内容过长，将拆分为多个帖子发布")
         slices = []
-        remaining = self.daily_violations.copy()
+        remaining = today_violations.copy()
         part = 1
         while remaining:
             best = 1
             for cnt in range(1, len(remaining)+1):
-                test = self._build_report_section(remaining[:cnt], part, 0, overall)
+                test = self._build_report_section(remaining[:cnt], part, 0, overall_stats)
                 if len(test) <= 4000:
                     best = cnt
                 else:
@@ -288,39 +298,92 @@ class AdminBot:
 
         total_parts = len(slices)
         for idx, part_violations in enumerate(slices, 1):
-            part_content = self._build_report_section(part_violations, idx, total_parts, overall)
+            part_content = self._build_report_section(part_violations, idx, total_parts, overall_stats)
             if idx == total_parts:
                 part_content += f"\n\n---\n**今日小结**：{summary}\n"
-            part_title = f"【管理日报】{today} 第{self.loop_count}次扫描 - 违规 {total_violations} 个（第{idx}部分/共{total_parts}部分）"
-            retry_login = (idx == 1)
-            self._post_with_retry(poster, part_title, part_content, retry_login=retry_login)
+            part_title = f"【管理日报】{today} 第{self.loop_count}次循环 - 违规 {total_violations} 个（第{idx}部分/共{total_parts}部分）"
+            self._post_with_retry(poster, part_title, part_content)
             if idx < total_parts:
                 time.sleep(self.post_interval_minutes * 60)
+        self.last_report_time = time.time()
 
-    def run(self, continuous=False):
+    def _should_post_report(self, now):
+        if self.daily_report_interval == 0:
+            return True
+        if self.last_report_time is None:
+            return True
+        return (now - self.last_report_time) >= self.daily_report_interval
+
+    def process_admin_commands(self, poster):
+        """扫描管理日报帖子下的评论，处理删除指令"""
+        # 获取管理区（板块15）的帖子列表
+        threads = poster.get_threads(self.token, category_id=self.admin_category, page_limit=10)
+        if not threads:
+            return
+        for thread in threads:
+            # 只处理标题包含“管理日报”的帖子
+            if "管理日报" not in thread.get('title', ''):
+                continue
+            thread_id = thread['id']
+            # 获取该帖子下的评论
+            comments = poster.get_post_comments(self.token, thread_id)
+            for comment in comments:
+                content = comment.get('content', '')
+                # 匹配命令：删除第1个违规帖子
+                match = re.search(r'删[除掉]第(\d+)[个\s]*违规帖子', content)
+                if match:
+                    idx = int(match.group(1))
+                    # 从当日的 daily_violations 中找出对应索引的帖子（注意索引从1开始）
+                    today = date.today().isoformat()
+                    today_violations = [v for v in self.daily_violations if v['time'].startswith(today)]
+                    if 1 <= idx <= len(today_violations):
+                        target = today_violations[idx-1]
+                        tid = target['thread_id']
+                        print(f"收到删除指令：删除帖子 {tid} (第{idx}个违规)")
+                        # 调用删除 API
+                        success = poster.delete_thread(self.token, tid)
+                        if success:
+                            print(f"✅ 已删除帖子 {tid}")
+                            # 在评论区回复确认
+                            poster.reply_to_comment(self.token, comment['id'], f"已删除帖子 {tid}")
+                        else:
+                            print(f"❌ 删除帖子 {tid} 失败")
+                            poster.reply_to_comment(self.token, comment['id'], f"删除帖子 {tid} 失败，请检查权限")
+                    else:
+                        poster.reply_to_comment(self.token, comment['id'], f"索引 {idx} 超出范围，共有 {len(today_violations)} 个违规帖子")
+                # 可以扩展其他命令，如“删除所有违规帖子”等
+
+    def run(self):
         print("[管理员机器人] 启动")
         if not self.login():
             print("登录失败，退出")
             return
         poster = BBSPoster(self.session, BASE_URL)
-        self.loop_count = 0
-        try:
-            while self.running:
-                self.loop_count += 1
-                print(f"\n[循环] 第 {self.loop_count} 次扫描 - {datetime.now()}")
-                scanned, violations = self.scan_threads(poster)
-                print(f"[统计] 本轮扫描: 新增记录 {scanned} 个帖子，发现违规 {violations} 个")
+        while self.running:
+            self.loop_count += 1
+            print(f"\n[循环] 第 {self.loop_count} 次执行 - {datetime.now()}")
+            scanned, violations = self.scan_threads(poster)
+            print(f"[统计] 新增记录 {scanned} 个帖子，发现违规 {violations} 个")
+            # 处理管理指令（先执行，可以在日报后处理）
+            self.process_admin_commands(poster)
+            if self._should_post_report(time.time()):
                 self.post_daily_report(poster)
-                self._save_state()
-                if not continuous or not self.running:
-                    break
-                # 连续模式下等待间隔（单次模式不等待）
-                for _ in range(self.config.get("scan_interval", 7200)):
-                    if not self.running:
-                        break
-                    time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n[中断] 用户中断")
-        finally:
             self._save_state()
-            print("[完成] 状态已保存，机器人退出")
+            for _ in range(self.scan_interval):
+                if not self.running:
+                    break
+                time.sleep(1)
+
+if __name__ == "__main__":
+    # 使用示例：需要传入配置和 API Key
+    import os
+    config = {
+        "username": os.getenv("BOT_USERNAME"),
+        "password": os.getenv("BOT_PASSWORD"),
+        "login_retries": 50,
+        "target_categories": [2, 5],
+        # 其他配置...
+    }
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    bot = AdminBot(config, api_key)
+    bot.run()
