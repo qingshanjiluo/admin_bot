@@ -9,7 +9,7 @@ from datetime import datetime, date
 from login import BBSTurkeyBotLogin
 from post import BBSPoster
 from common import BASE_URL
-from deepseek_client import DeepSeekClient   # 可选，使用 DeepSeek API；若用 Ollama 可替换
+from deepseek_client import DeepSeekClient
 
 class AdminBot:
     def __init__(self, config, api_key):
@@ -27,9 +27,7 @@ class AdminBot:
         self.content_snippet_length = config.get("content_snippet_length", 200)
         self.exempt_ids = set(config.get("exempt_thread_ids", [15669, 28348, 27305, 27115, 11411, 3448]))
         
-        # 使用 DeepSeek API 或 Ollama（二选一）
-        self.ai = DeepSeekClient(api_key=api_key)   # 替换为 Ollama 客户端亦可
-        
+        self.ai = DeepSeekClient(api_key=api_key)
         self.background = self._load_file("mk48.txt")
         self.rules = self._load_file("rules.txt")
         self.sensitive_words = self._load_sensitive_words()
@@ -49,6 +47,7 @@ class AdminBot:
         self.warned_ids.update(self.exempt_ids)
         signal.signal(signal.SIGINT, self._signal_handler)
 
+    # ---------- 辅助函数 ----------
     def _load_file(self, fname):
         try:
             with open(fname, 'r', encoding='utf-8') as f:
@@ -105,9 +104,13 @@ class AdminBot:
             self.session = sess
             self.token = res['data']['token']
             self.user_id = res['data']['id']
+            # 将 user_id 传递给 poster 用于删除等操作
+            self.poster = BBSPoster(self.session, BASE_URL)
+            self.poster.user_id = self.user_id
             return True
         return False
 
+    # ---------- 违规检测 ----------
     def check_violation(self, text):
         hit = self._contains_sensitive(text)
         if hit:
@@ -117,17 +120,18 @@ class AdminBot:
             return False, None, "AI调用失败"
         return violation, vtype, reason
 
-    def send_warning(self, poster, thread_id, violation_type, reason):
-        """在违规帖子下发布警告评论"""
+    # ---------- 发送警告评论 ----------
+    def send_warning(self, thread_id, violation_type, reason):
         warn_msg = f"【管理员警告】您的帖子涉嫌违规（类型：{violation_type}）。请遵守论坛规则。理由：{reason[:200]}。如有疑问，请联系管理员。"
-        success = poster.create_comment(self.token, thread_id, warn_msg)
+        success = self.poster.create_comment(self.token, thread_id, warn_msg)
         if success:
             print(f"✅ 已对帖子 {thread_id} 发出警告")
         else:
             print(f"❌ 警告发布失败，帖子 {thread_id}")
         return success
 
-    def scan_threads(self, poster):
+    # ---------- 扫描帖子 ----------
+    def scan_threads(self):
         scanned = 0
         violations = 0
         for cat_id in self.target_categories:
@@ -139,7 +143,7 @@ class AdminBot:
             while total < self.max_threads:
                 if not self.running:
                     break
-                threads = poster.get_threads(self.token, cat_id, page_limit=self.max_threads, page_offset=offset)
+                threads = self.poster.get_threads(self.token, cat_id, page_limit=self.max_threads, page_offset=offset)
                 if not threads:
                     break
                 # 跳过最新的若干条
@@ -190,7 +194,7 @@ class AdminBot:
                         violations += 1
                         print(f"      ⚠️ 违规！类型: {vtype}, 原因: {reason[:100]}...")
                         # 发送警告评论
-                        self.send_warning(poster, tid, vtype, reason)
+                        self.send_warning(tid, vtype, reason)
                     elif violation and vtype == 'ad':
                         print(f"      [广告忽略]")
                     else:
@@ -204,6 +208,7 @@ class AdminBot:
                     break
         return scanned, violations
 
+    # ---------- 日报相关 ----------
     def _build_report_section(self, violations_sublist, start_idx, total_parts, overall):
         content = f"## 📊 {overall['today']} 违规统计 (第{start_idx}部分/共{total_parts}部分)\n\n"
         content += f"- 今日发现违规帖子：{overall['total_violations']}\n"
@@ -218,9 +223,8 @@ class AdminBot:
         content += f"\n---\n*报告由最中幻想天眼管理机器人自动生成*"
         return content
 
-    def _post_with_retry(self, poster, title, content):
-        """发布帖子，失败时重试一次并保存本地备份"""
-        success, _ = poster.create_thread(self.token, self.admin_category, title, content)
+    def _post_with_retry(self, title, content):
+        success, _ = self.poster.create_thread(self.token, self.admin_category, title, content)
         if success:
             print(f"[日报] 成功发布")
             return True
@@ -228,8 +232,7 @@ class AdminBot:
         time.sleep(30)
         # 重新登录
         if self.login():
-            poster = BBSPoster(self.session, BASE_URL)
-            success2, _ = poster.create_thread(self.token, self.admin_category, title, content)
+            success2, _ = self.poster.create_thread(self.token, self.admin_category, title, content)
             if success2:
                 print("[日报] 重试成功")
                 return True
@@ -240,7 +243,7 @@ class AdminBot:
         print(f"[日报] 已保存至 {filename}")
         return False
 
-    def post_daily_report(self, poster):
+    def post_daily_report(self):
         today = date.today().isoformat()
         today_violations = [v for v in self.daily_violations if v['time'].startswith(today)]
         total_violations = len(today_violations)
@@ -274,7 +277,7 @@ class AdminBot:
         if len(full_content) <= 4000:
             full_content += f"\n\n---\n**今日小结**：{summary}\n"
             title = f"【管理日报】{today} 第{self.loop_count}次循环 - 违规 {total_violations} 个"
-            self._post_with_retry(poster, title, full_content)
+            self._post_with_retry(title, full_content)
             self.last_report_time = time.time()
             return
 
@@ -302,7 +305,7 @@ class AdminBot:
             if idx == total_parts:
                 part_content += f"\n\n---\n**今日小结**：{summary}\n"
             part_title = f"【管理日报】{today} 第{self.loop_count}次循环 - 违规 {total_violations} 个（第{idx}部分/共{total_parts}部分）"
-            self._post_with_retry(poster, part_title, part_content)
+            self._post_with_retry(part_title, part_content)
             if idx < total_parts:
                 time.sleep(self.post_interval_minutes * 60)
         self.last_report_time = time.time()
@@ -314,60 +317,55 @@ class AdminBot:
             return True
         return (now - self.last_report_time) >= self.daily_report_interval
 
-    def process_admin_commands(self, poster):
+    # ---------- 处理管理指令 ----------
+    def process_admin_commands(self):
         """扫描管理日报帖子下的评论，处理删除指令"""
         # 获取管理区（板块15）的帖子列表
-        threads = poster.get_threads(self.token, category_id=self.admin_category, page_limit=10)
+        threads = self.poster.get_threads(self.token, category_id=self.admin_category, page_limit=10)
         if not threads:
             return
         for thread in threads:
-            # 只处理标题包含“管理日报”的帖子
             if "管理日报" not in thread.get('title', ''):
                 continue
             thread_id = thread['id']
-            # 获取该帖子下的评论
-            comments = poster.get_post_comments(self.token, thread_id)
+            comments = self.poster.get_post_comments(self.token, thread_id)
             for comment in comments:
                 content = comment.get('content', '')
                 # 匹配命令：删除第1个违规帖子
                 match = re.search(r'删[除掉]第(\d+)[个\s]*违规帖子', content)
                 if match:
                     idx = int(match.group(1))
-                    # 从当日的 daily_violations 中找出对应索引的帖子（注意索引从1开始）
                     today = date.today().isoformat()
                     today_violations = [v for v in self.daily_violations if v['time'].startswith(today)]
                     if 1 <= idx <= len(today_violations):
                         target = today_violations[idx-1]
                         tid = target['thread_id']
                         print(f"收到删除指令：删除帖子 {tid} (第{idx}个违规)")
-                        # 调用删除 API
-                        success = poster.delete_thread(self.token, tid)
+                        success = self.poster.delete_thread(self.token, tid)
                         if success:
                             print(f"✅ 已删除帖子 {tid}")
-                            # 在评论区回复确认
-                            poster.reply_to_comment(self.token, comment['id'], f"已删除帖子 {tid}")
+                            self.poster.reply_to_comment(self.token, comment['id'], f"已删除帖子 {tid}")
                         else:
                             print(f"❌ 删除帖子 {tid} 失败")
-                            poster.reply_to_comment(self.token, comment['id'], f"删除帖子 {tid} 失败，请检查权限")
+                            self.poster.reply_to_comment(self.token, comment['id'], f"删除帖子 {tid} 失败，请检查权限")
                     else:
-                        poster.reply_to_comment(self.token, comment['id'], f"索引 {idx} 超出范围，共有 {len(today_violations)} 个违规帖子")
-                # 可以扩展其他命令，如“删除所有违规帖子”等
+                        self.poster.reply_to_comment(self.token, comment['id'], f"索引 {idx} 超出范围，共有 {len(today_violations)} 个违规帖子")
 
+    # ---------- 主循环 ----------
     def run(self):
         print("[管理员机器人] 启动")
         if not self.login():
             print("登录失败，退出")
             return
-        poster = BBSPoster(self.session, BASE_URL)
         while self.running:
             self.loop_count += 1
             print(f"\n[循环] 第 {self.loop_count} 次执行 - {datetime.now()}")
-            scanned, violations = self.scan_threads(poster)
+            scanned, violations = self.scan_threads()
             print(f"[统计] 新增记录 {scanned} 个帖子，发现违规 {violations} 个")
             # 处理管理指令（先执行，可以在日报后处理）
-            self.process_admin_commands(poster)
+            self.process_admin_commands()
             if self._should_post_report(time.time()):
-                self.post_daily_report(poster)
+                self.post_daily_report()
             self._save_state()
             for _ in range(self.scan_interval):
                 if not self.running:
@@ -375,15 +373,18 @@ class AdminBot:
                 time.sleep(1)
 
 if __name__ == "__main__":
-    # 使用示例：需要传入配置和 API Key
+    # 从环境变量读取配置
     import os
     config = {
         "username": os.getenv("BOT_USERNAME"),
         "password": os.getenv("BOT_PASSWORD"),
         "login_retries": 50,
         "target_categories": [2, 5],
-        # 其他配置...
+        # 可根据需要补充其他配置
     }
     api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        print("错误：未设置 DEEPSEEK_API_KEY 环境变量")
+        sys.exit(1)
     bot = AdminBot(config, api_key)
     bot.run()
