@@ -5,11 +5,22 @@ import json
 import signal
 import sys
 import re
+import requests
+import base64
+from io import BytesIO
 from datetime import datetime, date
 from login import BBSTurkeyBotLogin
 from post import BBSPoster
 from common import BASE_URL
 from deepseek_client import DeepSeekClient
+
+# 尝试导入 ddddocr（用于 OCR）
+try:
+    import ddddocr
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+    print("⚠️ ddddocr 未安装，图片文字识别功能将禁用")
 
 class AdminBot:
     def __init__(self, config, api_key):
@@ -44,6 +55,15 @@ class AdminBot:
         self.pinned_skipped = set()
         self.running = True
         
+        # OCR 初始化（如果可用）
+        self.ocr = None
+        if OCR_AVAILABLE:
+            try:
+                self.ocr = ddddocr.DdddOcr(show_ad=False)
+                print("✅ OCR 引擎初始化成功")
+            except Exception as e:
+                print(f"⚠️ OCR 初始化失败: {e}")
+        
         self._load_state()
         self.warned_ids.update(self.exempt_ids)
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -74,6 +94,53 @@ class AdminBot:
                 return word
         return False
 
+    def _extract_image_urls(self, html_content):
+        """从帖子内容 HTML 中提取图片 URL"""
+        if not html_content:
+            return []
+        # 匹配 img 标签的 src 属性
+        pattern = r'<img[^>]+src=["\'](.*?)["\']'
+        urls = re.findall(pattern, html_content)
+        # 过滤 data:image 等 base64 图片（可选处理）
+        valid_urls = []
+        for url in urls:
+            if url.startswith('http://') or url.startswith('https://'):
+                valid_urls.append(url)
+        return valid_urls
+
+    def _ocr_image(self, image_url):
+        """下载图片并识别文字，返回识别出的文本"""
+        if not self.ocr:
+            return ""
+        try:
+            # 下载图片（超时 10 秒）
+            resp = requests.get(image_url, timeout=10, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            if resp.status_code != 200:
+                return ""
+            # 识别图片中的文字
+            result = self.ocr.classification(resp.content)
+            return result.strip() if result else ""
+        except Exception as e:
+            print(f"⚠️ OCR 识别失败 {image_url}: {e}")
+            return ""
+
+    def _get_post_text_with_images(self, thread_detail):
+        """获取帖子的完整文本（内容 + 图片 OCR 文字）"""
+        content = thread_detail.get('content', '')
+        ocr_texts = []
+        image_urls = self._extract_image_urls(content)
+        # 最多识别前 3 张图片，避免耗时过长
+        for img_url in image_urls[:3]:
+            text = self._ocr_image(img_url)
+            if text:
+                ocr_texts.append(f"[图片文字] {text}")
+        if ocr_texts:
+            return content + "\n" + "\n".join(ocr_texts)
+        return content
+
+    # ---------- 状态持久化 ----------
     def _load_state(self):
         if os.path.exists("processed_admin.json"):
             with open("processed_admin.json", 'r', encoding='utf-8') as f:
@@ -177,8 +244,13 @@ class AdminBot:
     def scan_thread_and_comments(self, thread):
         tid = thread['id']
         title = thread['title']
-        content = thread.get('content', '')
-        full = f"{title}\n{content}"
+        # 获取完整帖子详情（含 HTML 内容）
+        detail = self.poster.get_thread_detail(self.token, tid)
+        if not detail:
+            detail = thread
+        # 获取带图片 OCR 文字的完整帖子文本
+        full_content = self._get_post_text_with_images(detail)
+        full = f"{title}\n{full_content}"
         
         comments = self._get_all_comments(tid)
         comments_text = ""
@@ -199,7 +271,7 @@ class AdminBot:
             "vtype": vtype if is_violation else None
         })
         
-        if is_violation and vtype != 'ad':
+        if is_violation and vtype not in ('ad', 'default'):
             self.daily_violations.append({
                 "time": datetime.now().isoformat(),
                 "type": "thread",
@@ -235,7 +307,7 @@ class AdminBot:
                 "violation": is_violation_c,
                 "vtype": vtype_c if is_violation_c else None
             })
-            if is_violation_c and vtype_c != 'ad':
+            if is_violation_c and vtype_c not in ('ad', 'default'):
                 self.daily_violations.append({
                     "time": datetime.now().isoformat(),
                     "type": "comment",
@@ -291,10 +363,7 @@ class AdminBot:
                         scanned += 1
                         continue
                     print(f"   处理: {t['title'][:30]} (ID: {tid})")
-                    if not t.get('content'):
-                        detail = self.poster.get_thread_detail(self.token, tid)
-                        if detail:
-                            t['content'] = detail.get('content', '')
+                    # 确保有内容（后续 scan_thread_and_comments 会获取详情）
                     self.scan_thread_and_comments(t)
                     scanned += 1
                 total += len(threads)
