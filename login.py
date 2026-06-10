@@ -6,8 +6,8 @@ import re
 
 class BBSTurkeyBotLogin:
     def __init__(self, base_url, username, password, max_retries=50):
-        self.base_url = base_url
-        self.api_base = f"{base_url}/bbs"
+        self.base_url = base_url.rstrip('/')
+        self.api_base = f"{self.base_url}/bbs"
         self.username = username
         self.password = password
         self.max_login_attempts = max_retries
@@ -17,12 +17,14 @@ class BBSTurkeyBotLogin:
         self.ocr = self._init_ddddocr()
 
     def _setup_headers(self):
+        # 关键：添加 mbbs-domain 头（根据成功测试）
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Termux) AppleWebKit/537.36',
             'Accept': 'application/json, text/plain, */*',
             'Origin': self.base_url,
             'Referer': f'{self.base_url}/login',
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'mbbs-domain': 'mk48by049.mbbs.cc'   # 必须
         })
 
     def _init_ddddocr(self):
@@ -31,7 +33,7 @@ class BBSTurkeyBotLogin:
             print("[OK] ddddocr 初始化成功")
             return ddddocr.DdddOcr(show_ad=False)
         except ImportError:
-            print("[错误] ddddocr 未安装")
+            print("[错误] ddddocr 未安装，请执行: pip install ddddocr")
             return None
         except Exception as e:
             print(f"[错误] ddddocr 初始化失败: {e}")
@@ -40,14 +42,15 @@ class BBSTurkeyBotLogin:
     def svg_to_png_cairosvg(self, svg_content: str) -> bytes:
         try:
             import cairosvg
-            return cairosvg.svg2png(
+            png_data = cairosvg.svg2png(
                 bytestring=svg_content.encode('utf-8'),
                 output_width=300,
                 output_height=100,
                 dpi=200
             )
+            return png_data
         except ImportError:
-            print("[错误] cairosvg 未安装")
+            print("[错误] cairosvg 未安装，请执行: pip install cairosvg")
             return None
         except Exception as e:
             print(f"[错误] cairosvg 转换失败: {e}")
@@ -65,7 +68,7 @@ class BBSTurkeyBotLogin:
                 if captcha_id and svg_data:
                     print(f"[OK] 验证码获取成功, ID: {captcha_id}")
                     return captcha_id, svg_data
-            print("[错误] 验证码获取失败")
+            print(f"[错误] 验证码获取失败，状态码: {response.status_code}")
             return None, None
         except Exception as e:
             print(f"[错误] 获取验证码错误: {e}")
@@ -126,7 +129,7 @@ class BBSTurkeyBotLogin:
                 print(f"[错误] HTTP 错误: {response.status_code}")
                 return False, None, f"HTTP {response.status_code}"
         except Exception as e:
-            print(f"[错误] 登录请求异常: {e}")
+            print(f("[错误] 登录请求异常: {e}"))
             return False, None, str(e)
 
     def login_with_retry(self):
