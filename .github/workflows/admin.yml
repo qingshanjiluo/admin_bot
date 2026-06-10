@@ -2,7 +2,7 @@ name: 论坛管理机器人
 
 on:
   schedule:
-    # 北京时间 6:00 (UTC 22:00), 12:00 (UTC 4:00), 21:00 (UTC 13:00)
+    # 北京时间 6:00, 12:00, 21:00 (UTC 22:00, 4:00, 13:00)
     - cron: '0 22,4,13 * * *'
   workflow_dispatch:  # 支持手动触发
 
@@ -11,6 +11,7 @@ permissions:
 
 env:
   TZ: Asia/Shanghai
+  PYTHON_VERSION: '3.10'
 
 jobs:
   run-admin-bot:
@@ -23,7 +24,7 @@ jobs:
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
       - name: 安装系统依赖（验证码识别所需）
@@ -40,10 +41,18 @@ jobs:
         env:
           BOT_USERNAME: ${{ secrets.BOT_USERNAME }}
           BOT_PASSWORD: ${{ secrets.BOT_PASSWORD }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          # 可选：覆盖默认配置
-          # TARGET_CATEGORIES: ${{ secrets.TARGET_CATEGORIES }}
-          # LOGIN_RETRIES: ${{ secrets.LOGIN_RETRIES }}
+          BASE_URL: ${{ secrets.BASE_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # 如果使用 DeepSeek 官方 API 且未设置 OPENAI_API_KEY，可使用以下备选
+          # DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          # OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          # 以下为可选参数（可按需添加）
+          TARGET_CATEGORIES: ${{ secrets.TARGET_CATEGORIES }}
+          LOGIN_RETRIES: ${{ secrets.LOGIN_RETRIES }}
+          MAX_THREADS: ${{ secrets.MAX_THREADS }}
+          SKIP_LATEST: ${{ secrets.SKIP_LATEST }}
+          CONTENT_SNIPPET_LENGTH: ${{ secrets.CONTENT_SNIPPET_LENGTH }}
         run: |
           python admin_bot.py
 
