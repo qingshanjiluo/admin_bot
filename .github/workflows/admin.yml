@@ -1,0 +1,57 @@
+name: 论坛管理机器人
+
+on:
+  schedule:
+    # 北京时间 6:00 (UTC 22:00), 12:00 (UTC 4:00), 21:00 (UTC 13:00)
+    - cron: '0 22,4,13 * * *'
+  workflow_dispatch:  # 支持手动触发
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  run-admin-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: 安装系统依赖（验证码识别所需）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-0
+
+      - name: 安装 Python 依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行管理机器人
+        env:
+          BOT_USERNAME: ${{ secrets.BOT_USERNAME }}
+          BOT_PASSWORD: ${{ secrets.BOT_PASSWORD }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # 可选：覆盖默认配置
+          # TARGET_CATEGORIES: ${{ secrets.TARGET_CATEGORIES }}
+          # LOGIN_RETRIES: ${{ secrets.LOGIN_RETRIES }}
+        run: |
+          python admin_bot.py
+
+      - name: 提交状态文件
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull origin main --rebase || true
+          git add processed_admin.json
+          git diff --staged --quiet || git commit -m "更新管理机器人状态"
+          git push
