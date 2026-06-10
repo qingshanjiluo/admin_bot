@@ -35,10 +35,10 @@ class AdminBot:
         self.session = None
         self.token = None
         self.user_id = None
-        self.warned_ids = set()          # 已警告的帖子ID
-        self.warned_comment_ids = set()  # 已警告的评论ID
-        self.daily_log = []               # 所有扫描记录（帖+评）
-        self.daily_violations = []        # 当日发现的违规项（帖+评）
+        self.warned_ids = set()
+        self.warned_comment_ids = set()
+        self.daily_log = []
+        self.daily_violations = []
         self.loop_count = 0
         self.last_report_time = None
         self.pinned_skipped = set()
@@ -112,6 +112,7 @@ class AdminBot:
             return True
         return False
 
+    # ---------- 违规检测 ----------
     def check_violation(self, text):
         hit = self._contains_sensitive(text)
         if hit:
@@ -121,7 +122,18 @@ class AdminBot:
             return False, None, "AI调用失败"
         return violation, vtype, reason
 
-    # ---------- 发送警告（针对帖子）----------
+    def check_violation_with_context(self, thread_text, comments_text):
+        """综合帖子内容和评论判断帖子是否违规"""
+        hit = self._contains_sensitive(thread_text)
+        if hit:
+            return True, "political", f"命中敏感词: {hit}"
+        combined = f"【帖子内容】\n{thread_text}\n\n【评论内容（可能包含违规）】\n{comments_text}"
+        violation, vtype, reason = self.ai.judge_violation(combined, self.background, self.rules)
+        if vtype is None:
+            return False, None, "AI调用失败"
+        return violation, vtype, reason
+
+    # ---------- 发送警告 ----------
     def send_warning_to_thread(self, thread_id, violation_type, reason):
         warn_msg = f"【管理员警告】您的帖子涉嫌违规（类型：{violation_type}）。请遵守论坛规则。理由：{reason[:200]}。如有疑问，请联系管理员。"
         success = self.poster.create_comment(self.token, thread_id, warn_msg)
@@ -131,7 +143,6 @@ class AdminBot:
             print(f"❌ 警告发布失败，帖子 {thread_id}")
         return success
 
-    # ---------- 发送警告（针对评论，嵌套回复）----------
     def send_warning_to_comment(self, post_id, violation_type, reason):
         warn_msg = f"【管理员警告】您的评论涉嫌违规（类型：{violation_type}）。请遵守论坛规则。理由：{reason[:200]}。如有疑问，请联系管理员。"
         success = self.poster.reply_to_comment(self.token, post_id, warn_msg)
@@ -141,18 +152,44 @@ class AdminBot:
             print(f"❌ 警告发布失败，评论 {post_id}")
         return success
 
+    # ---------- 递归获取评论 ----------
+    def _get_all_comments(self, thread_id):
+        comments = []
+        first_level = self.poster.get_post_comments(self.token, thread_id)
+        for c in first_level:
+            comments.append(c)
+            replies = self._get_replies(c['id'])
+            comments.extend(replies)
+        return comments
+
+    def _get_replies(self, post_id):
+        replies = []
+        resp = self.poster.get_comment_replies(self.token, post_id)
+        for r in resp:
+            replies.append(r)
+            deeper = self._get_replies(r['id'])
+            replies.extend(deeper)
+        return replies
+
     # ---------- 扫描单个帖子及其所有评论 ----------
     def scan_thread_and_comments(self, thread):
         tid = thread['id']
         title = thread['title']
         content = thread.get('content', '')
-        
-        # 1. 检测帖子本身
         full = f"{title}\n{content}"
-        is_violation, vtype, reason = self.check_violation(full)
+        
+        # 获取所有评论
+        comments = self._get_all_comments(tid)
+        # 构建评论上下文（前20条，每条最多150字）
+        comments_text = ""
+        for idx, c in enumerate(comments[:20]):
+            c_content = c.get('content', '')[:150]
+            comments_text += f"评论{idx+1}: {c_content}\n"
+        
+        # 1. 检测帖子本身（结合评论）
+        is_violation, vtype, reason = self.check_violation_with_context(full, comments_text)
         snippet = full[:self.content_snippet_length] + ("..." if len(full) > self.content_snippet_length else "")
         
-        # 记录帖子日志
         self.daily_log.append({
             "time": datetime.now().isoformat(),
             "type": "thread",
@@ -181,15 +218,13 @@ class AdminBot:
         
         self.warned_ids.add(tid)
         
-        # 2. 获取所有评论（包括嵌套）
-        comments = self._get_all_comments(tid)
+        # 2. 对每条评论单独检测
         for comment in comments:
             cid = comment['id']
             if cid in self.warned_comment_ids:
                 continue
             c_content = comment.get('content', '')
             c_author = comment.get('user', {}).get('nickname', '未知')
-            # 检测评论违规
             is_violation_c, vtype_c, reason_c = self.check_violation(c_content)
             snippet_c = c_content[:self.content_snippet_length] + ("..." if len(c_content) > self.content_snippet_length else "")
             self.daily_log.append({
@@ -212,35 +247,16 @@ class AdminBot:
                     "snippet": snippet_c,
                     "vtype": vtype_c,
                     "reason": reason_c,
-                    "link": f"https://mk48by049.mbbs.cc/#/thread/detail/{tid}"  # 无法直接跳转评论，提供帖子链接
+                    "link": f"https://mk48by049.mbbs.cc/#/thread/detail/{tid}"
                 })
                 print(f"      ⚠️ 评论违规！类型: {vtype_c}, 原因: {reason_c[:100]}...")
                 self.send_warning_to_comment(cid, vtype_c, reason_c)
             else:
                 print(f"      ✅ 评论合规")
             self.warned_comment_ids.add(cid)
-            time.sleep(0.3)  # 避免请求过快
+            time.sleep(0.3)
         
-        return 1  # 扫描计数（帖子+评论单独计数）
-
-    def _get_all_comments(self, thread_id):
-        """递归获取帖子下所有评论（扁平列表）"""
-        comments = []
-        first_level = self.poster.get_post_comments(self.token, thread_id)
-        for c in first_level:
-            comments.append(c)
-            replies = self._get_replies(c['id'])
-            comments.extend(replies)
-        return comments
-
-    def _get_replies(self, post_id):
-        replies = []
-        resp = self.poster.get_comment_replies(self.token, post_id)
-        for r in resp:
-            replies.append(r)
-            deeper = self._get_replies(r['id'])
-            replies.extend(deeper)
-        return replies
+        return 1
 
     # ---------- 扫描板块 ----------
     def scan_threads(self):
@@ -258,7 +274,6 @@ class AdminBot:
                 threads = self.poster.get_threads(self.token, cat_id, page_limit=self.max_threads, page_offset=offset)
                 if not threads:
                     break
-                # 跳过最新的若干条
                 if len(threads) > self.skip_latest:
                     process = threads[self.skip_latest:]
                     print(f"   跳过本页最新 {self.skip_latest} 个帖子")
@@ -278,19 +293,17 @@ class AdminBot:
                         scanned += 1
                         continue
                     print(f"   处理: {t['title'][:30]} (ID: {tid})")
-                    # 确保有完整内容
                     if not t.get('content'):
                         detail = self.poster.get_thread_detail(self.token, tid)
                         if detail:
                             t['content'] = detail.get('content', '')
                     self.scan_thread_and_comments(t)
                     scanned += 1
-                    violations += len([v for v in self.daily_violations if v['time'].startswith(date.today().isoformat())])
                 total += len(threads)
                 offset += 1
                 if len(threads) < self.max_threads:
                     break
-        return scanned, violations
+        return scanned, len([v for v in self.daily_violations if v['time'].startswith(date.today().isoformat())])
 
     # ---------- 日报相关 ----------
     def _build_report_section(self, violations_sublist, start_idx, total_parts, overall):
@@ -302,15 +315,14 @@ class AdminBot:
         for idx, v in enumerate(violations_sublist, 1):
             if v['type'] == 'thread':
                 content += f"{idx}. [帖子] [{v['title']}]({v['link']})\n"
+                content += f"   - **类型**：{v['vtype']}\n"
+                content += f"   - **原因**：{v['reason']}\n"
+                content += f"   - **原文摘要**：{v.get('snippet', '无')}\n\n"
             else:
                 content += f"{idx}. [评论] 作者：{v['author']} 在帖子ID {v['thread_id']} 中\n"
                 content += f"   - 评论内容摘要：{v['snippet']}\n"
                 content += f"   - **类型**：{v['vtype']}\n"
-                content += f"   - **原因**：{v['reason']}\n"
-                continue
-            content += f"   - **类型**：{v['vtype']}\n"
-            content += f"   - **原因**：{v['reason']}\n"
-            content += f"   - **原文摘要**：{v.get('snippet', '无')}\n\n"
+                content += f"   - **原因**：{v['reason']}\n\n"
         content += f"\n---\n*报告由最中幻想天眼管理机器人自动生成*"
         return content
 
@@ -338,7 +350,6 @@ class AdminBot:
         total_violations = len(today_violations)
         total_checked = len(self.warned_ids) + len(self.warned_comment_ids)
 
-        # 类型分布
         type_dist = {}
         for v in today_violations:
             t = v['vtype']
@@ -404,7 +415,7 @@ class AdminBot:
             return True
         return (now - self.last_report_time) >= self.daily_report_interval
 
-    # ---------- 处理管理指令（仅处理帖子删除）----------
+    # ---------- 处理管理指令 ----------
     def process_admin_commands(self):
         threads = self.poster.get_threads(self.token, category_id=self.admin_category, page_limit=10)
         if not threads:
@@ -434,7 +445,6 @@ class AdminBot:
                             self.poster.reply_to_comment(self.token, comment['id'], f"删除帖子 {tid} 失败，请检查权限")
                     else:
                         self.poster.reply_to_comment(self.token, comment['id'], f"索引 {idx} 超出范围，共有 {len(today_violations)} 个违规帖子")
-                # 可扩展删除评论指令（需实现删除评论API）
 
     # ---------- 主循环 ----------
     def run(self):
@@ -464,9 +474,9 @@ if __name__ == "__main__":
         "login_retries": 50,
         "target_categories": [2, 5],
     }
-    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
-        print("错误：未设置 DEEPSEEK_API_KEY 或 OPENAI_API_KEY 环境变量")
+        print("错误：未设置 OPENAI_API_KEY 或 DEEPSEEK_API_KEY 环境变量")
         sys.exit(1)
     bot = AdminBot(config, api_key)
     bot.run()
