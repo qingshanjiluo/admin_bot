@@ -29,7 +29,10 @@ class AdminBot:
         self.scan_interval = int(config.get("scan_interval", os.getenv("SCAN_INTERVAL", "7200")))
         target_cats = config.get("target_categories") or os.getenv("TARGET_CATEGORIES", "2,5")
         self.target_categories = [int(x) for x in str(target_cats).split(",") if x.strip()]
-        self.admin_category = 15
+        
+        # 日报发布板块（默认聊天区2，可通过环境变量覆盖）
+        self.report_category = int(os.getenv("REPORT_CATEGORY", "2"))
+        
         self.skip_latest = int(config.get("skip_latest", os.getenv("SKIP_LATEST", "5")))
         self.max_threads = int(config.get("max_threads", os.getenv("MAX_THREADS", "30")))
         self.daily_report_interval = int(config.get("daily_report_interval", os.getenv("DAILY_REPORT_INTERVAL", "86400")))
@@ -361,7 +364,7 @@ class AdminBot:
                     break
         return scanned, len([v for v in self.daily_violations if v['time'].startswith(date.today().isoformat())])
 
-    # ---------- 日报相关（专业风格）----------
+    # ---------- 日报相关（专业风格，发布到聊天区）----------
     def _build_report_section(self, violations_sublist, start_idx, total_parts, overall):
         content = f"## 📊 {overall['today']} 违规统计 (第{start_idx}部分/共{total_parts}部分)\n\n"
         content += f"- 今日发现违规项：{overall['total_violations']}\n"
@@ -383,14 +386,15 @@ class AdminBot:
         return content
 
     def _post_with_retry(self, title, content):
-        success, _ = self.poster.create_thread(self.token, self.admin_category, title, content)
+        # 使用 self.report_category 替代原来的 self.admin_category（已删除）
+        success, _ = self.poster.create_thread(self.token, self.report_category, title, content)
         if success:
             print(f"[日报] 成功发布")
             return True
         print("[日报] 发布失败，30秒后重试...")
         time.sleep(30)
         if self.login():
-            success2, _ = self.poster.create_thread(self.token, self.admin_category, title, content)
+            success2, _ = self.poster.create_thread(self.token, self.report_category, title, content)
             if success2:
                 print("[日报] 重试成功")
                 return True
@@ -476,7 +480,7 @@ class AdminBot:
 
     # ---------- 处理管理指令 ----------
     def process_admin_commands(self):
-        threads = self.poster.get_threads(self.token, category_id=self.admin_category, page_limit=10)
+        threads = self.poster.get_threads(self.token, category_id=self.report_category, page_limit=10)
         if not threads:
             return
         for thread in threads:
@@ -515,13 +519,25 @@ class AdminBot:
             print("登录失败，退出")
             return
         
-        self.loop_count += 1
-        print(f"\n[循环] 第 {self.loop_count} 次执行 - {datetime.now()}")
-        scanned, violations = self.scan_threads()
-        print(f"[统计] 本次扫描新增记录 {scanned} 个帖子（含评论），发现违规 {violations} 项")
-        self.process_admin_commands()
-        self.post_daily_report(force=True)   # 强制发布日报
-        self._save_state()
+        try:
+            self.loop_count += 1
+            print(f"\n[循环] 第 {self.loop_count} 次执行 - {datetime.now()}")
+            scanned, violations = self.scan_threads()
+            print(f"[统计] 本次扫描新增记录 {scanned} 个帖子（含评论），发现违规 {violations} 项")
+            self.process_admin_commands()
+        except Exception as e:
+            print(f"❌ 扫描过程中发生异常: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            print("[日报] 开始发布日报...")
+            try:
+                self.post_daily_report(force=True)
+                print("[日报] 日报发布流程完成")
+            except Exception as e:
+                print(f"❌ 发布日报失败: {e}")
+            self._save_state()
+            print("[完成] 状态已保存")
 
         if not once:
             # 连续运行模式（供本地调试使用）
@@ -529,11 +545,15 @@ class AdminBot:
                 time.sleep(self.scan_interval)
                 self.loop_count += 1
                 print(f"\n[循环] 第 {self.loop_count} 次执行 - {datetime.now()}")
-                scanned, violations = self.scan_threads()
-                print(f"[统计] 本次扫描新增记录 {scanned} 个帖子（含评论），发现违规 {violations} 项")
-                self.process_admin_commands()
-                self.post_daily_report()      # 正常间隔检查
-                self._save_state()
+                try:
+                    scanned, violations = self.scan_threads()
+                    print(f"[统计] 本次扫描新增记录 {scanned} 个帖子（含评论），发现违规 {violations} 项")
+                    self.process_admin_commands()
+                except Exception as e:
+                    print(f"❌ 扫描异常: {e}")
+                finally:
+                    self.post_daily_report()
+                    self._save_state()
         else:
             print("[完成] 单次扫描结束，退出")
 
