@@ -22,7 +22,7 @@ except ImportError:
 
 class AdminBot:
     def __init__(self, config, api_key):
-        # 加载配置（环境变量优先）
+        # 加载配置（环境变量优先，兼容旧版）
         self.username = config.get("username") or os.getenv("BOT_USERNAME")
         self.password = config.get("password") or os.getenv("BOT_PASSWORD")
         self.login_retries = int(config.get("login_retries", os.getenv("LOGIN_RETRIES", "50")))
@@ -175,7 +175,6 @@ class AdminBot:
 
     # ---------- 违规检测 ----------
     def check_violation(self, text, context_text=""):
-        """检测内容是否违规，返回 (violation, type, reason)"""
         hit = self._contains_sensitive(text)
         if hit:
             return True, "political", f"敏感词:{hit}"
@@ -186,26 +185,25 @@ class AdminBot:
             return False, None, ""
         return violation, vtype, reason
 
-    # ---------- 发送警告（可爱猫娘风格，使用 AI 生成的 reason）----------
+    # ---------- 发送警告（AI 生成完整文本）----------
     def send_warning_to_thread(self, thread_id, violation_type, reason):
-        # 如果 AI 没有生成 reason，使用默认短句
-        if not reason:
-            reason = "有点小问题呢"
-        warn_msg = f"喵~ 这条内容可能有点违规了（{violation_type}）⊙∀⊙！{reason[:30]}... 注意版规喵，谢谢理解~"
+        warn_msg = self.ai.generate_warning(violation_type, reason, target_type="帖子")
+        if not warn_msg:
+            warn_msg = f"喵~ 这条内容可能有点违规了（{violation_type}）⊙∀⊙！请遵守版规喵~"
         success = self.poster.create_comment(self.token, thread_id, warn_msg)
         if success:
-            print(f"✅ 已对帖子 {thread_id} 发出警告")
+            print(f"✅ 已对帖子 {thread_id} 发出警告: {warn_msg[:50]}...")
         else:
             print(f"❌ 警告发布失败，帖子 {thread_id}")
         return success
 
     def send_warning_to_comment(self, post_id, violation_type, reason):
-        if not reason:
-            reason = "有点小问题呢"
-        warn_msg = f"喵~ 这条评论有点问题喔（{violation_type}）⊙∀⊙！{reason[:30]}... 下次注意啦，感谢配合~"
+        warn_msg = self.ai.generate_warning(violation_type, reason, target_type="评论")
+        if not warn_msg:
+            warn_msg = f"喵~ 这条评论有点问题喔（{violation_type}）⊙∀⊙！下次注意啦~"
         success = self.poster.reply_to_comment(self.token, post_id, warn_msg)
         if success:
-            print(f"✅ 已对评论 {post_id} 发出警告")
+            print(f"✅ 已对评论 {post_id} 发出警告: {warn_msg[:50]}...")
         else:
             print(f"❌ 警告发布失败，评论 {post_id}")
         return success
@@ -402,7 +400,10 @@ class AdminBot:
         print(f"[日报] 已保存至 {filename}")
         return False
 
-    def post_daily_report(self):
+    def post_daily_report(self, force=False):
+        """发布日报，force=True 时忽略时间间隔强制发布"""
+        if not force and not self._should_post_report(time.time()):
+            return
         today = date.today().isoformat()
         today_violations = [v for v in self.daily_violations if v['time'].startswith(today)]
         total_violations = len(today_violations)
@@ -504,28 +505,40 @@ class AdminBot:
                     else:
                         self.poster.reply_to_comment(self.token, comment['id'], f"索引 {idx} 超出范围，共有 {len(today_violations)} 个违规帖子")
 
-    # ---------- 主循环 ----------
-    def run(self):
+    # ---------- 主运行逻辑 ----------
+    def run(self, once=True):
+        """运行机器人
+        :param once: True=单次扫描后退出；False=连续循环扫描（原行为）
+        """
         print("[管理员机器人] 启动")
         if not self.login():
             print("登录失败，退出")
             return
-        while self.running:
-            self.loop_count += 1
-            print(f"\n[循环] 第 {self.loop_count} 次执行 - {datetime.now()}")
-            scanned, violations = self.scan_threads()
-            print(f"[统计] 本次扫描新增记录 {scanned} 个帖子（含评论），发现违规 {violations} 项")
-            self.process_admin_commands()
-            if self._should_post_report(time.time()):
-                self.post_daily_report()
-            self._save_state()
-            for _ in range(self.scan_interval):
-                if not self.running:
-                    break
-                time.sleep(1)
+        
+        self.loop_count += 1
+        print(f"\n[循环] 第 {self.loop_count} 次执行 - {datetime.now()}")
+        scanned, violations = self.scan_threads()
+        print(f"[统计] 本次扫描新增记录 {scanned} 个帖子（含评论），发现违规 {violations} 项")
+        self.process_admin_commands()
+        self.post_daily_report(force=True)   # 强制发布日报
+        self._save_state()
+
+        if not once:
+            # 连续运行模式（供本地调试使用）
+            while self.running:
+                time.sleep(self.scan_interval)
+                self.loop_count += 1
+                print(f"\n[循环] 第 {self.loop_count} 次执行 - {datetime.now()}")
+                scanned, violations = self.scan_threads()
+                print(f"[统计] 本次扫描新增记录 {scanned} 个帖子（含评论），发现违规 {violations} 项")
+                self.process_admin_commands()
+                self.post_daily_report()      # 正常间隔检查
+                self._save_state()
+        else:
+            print("[完成] 单次扫描结束，退出")
 
 if __name__ == "__main__":
-    import os
+    once = "--once" in sys.argv
     config = {
         "username": os.getenv("BOT_USERNAME"),
         "password": os.getenv("BOT_PASSWORD"),
@@ -535,4 +548,4 @@ if __name__ == "__main__":
         print("错误：未设置 OPENAI_API_KEY 或 DEEPSEEK_API_KEY 环境变量")
         sys.exit(1)
     bot = AdminBot(config, api_key)
-    bot.run()
+    bot.run(once=once)
